@@ -75,6 +75,9 @@ from sensor_msgs.msg import Image
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import Bool
 
+from carla_can_msgs.msg import LogitechControl
+from time import time
+
 # ==============================================================================
 # -- World ---------------------------------------------------------------------
 # ==============================================================================
@@ -203,6 +206,16 @@ class KeyboardControl(object):
         self.set_vehicle_control_manual_override(
             self.vehicle_control_manual_override)  # disable manual override
 
+        #added by QAD 
+        self.driver_sub = self.node.new_subscription(LogitechControl, 'CarlaCANOut', self.driver_callback, 10)
+
+        # Track previous states for debouncing
+        self.prev_reverse = False
+        self.prev_manual_control = False
+        self.prev_hud = False
+        self.prev_help = False
+        self.prev_quit = False
+
     def set_vehicle_control_manual_override(self, enable):
         """
         Set the manual control override
@@ -215,6 +228,45 @@ class KeyboardControl(object):
         enable/disable the autopilot
         """
         self.auto_pilot_enable_publisher.publish(Bool(data=enable))
+    
+    def driver_callback(self,msg):
+        #comes from carla_can (TODO: change joystick control to carlacan)
+        
+        #ROS messages
+        # ROS messages with debouncing
+        if msg.reverse != self.prev_reverse:
+            self.prev_reverse = msg.reverse
+            if msg.reverse:
+                self._control.gear = 1 if self._control.reverse else -1
+
+        if msg.manual_control != self.prev_manual_control:
+            self.prev_manual_control = msg.manual_control
+            if msg.manual_control:
+                self.vehicle_control_manual_override = not self.vehicle_control_manual_override
+                self.set_vehicle_control_manual_override(self.vehicle_control_manual_override)
+
+        if msg.hud != self.prev_hud:
+            self.prev_hud = msg.hud
+            if msg.hud:
+                self.hud.toggle_info()
+
+        if msg.help != self.prev_help:
+            self.prev_help = msg.help
+            if msg.help:
+                self.hud.help.toggle()
+
+        if msg.quit != self.prev_quit:
+            self.prev_quit = msg.quit
+            if msg.quit:
+                return True
+
+        if not self._autopilot_enabled and self.vehicle_control_manual_override:
+
+            #Driving commands
+            self._control.throttle = msg.torque/2000
+            self._control.steer = msg.steering/16
+            self._control.brake = -msg.brake/10
+            self._control.hand_brake = msg.hand_brake #bool(keys[K_SPACE])
 
     # pylint: disable=too-many-branches
     def parse_events(self, clock):
@@ -269,21 +321,26 @@ class KeyboardControl(object):
                 self.node.logwarn("Could not send vehicle control: {}".format(error))
 
     def _parse_vehicle_keys(self, keys, milliseconds):
-        """
+        """4
         parse key events
         """
-        self._control.throttle = 1.0 if keys[K_UP] or keys[K_w] else 0.0
+        self._control.throttle = 1.0 if keys[K_UP] or keys[K_w] else self._control.throttle #0.0
         steer_increment = 5e-4 * milliseconds
         if keys[K_LEFT] or keys[K_a]:
+            if self._steer_cache > 0.0: 
+                self._steer_cache = 0.0
             self._steer_cache -= steer_increment
         elif keys[K_RIGHT] or keys[K_d]:
+            if self._steer_cache < 0.0: 
+                self._steer_cache = 0.0
             self._steer_cache += steer_increment
         else:
-            self._steer_cache = 0.0
-        self._steer_cache = min(0.7, max(-0.7, self._steer_cache))
-        self._control.steer = round(self._steer_cache, 1)
-        self._control.brake = 1.0 if keys[K_DOWN] or keys[K_s] else 0.0
-        self._control.hand_brake = bool(keys[K_SPACE])
+            self._steer_cache = self._steer_cache #0.0
+        if keys[K_LEFT] or keys[K_a] or keys[K_RIGHT] or keys[K_d]:
+            self._steer_cache = min(0.7, max(-0.7, self._steer_cache))
+            self._control.steer = round(self._steer_cache, 1)
+        self._control.brake = 1.0 if keys[K_DOWN] or keys[K_s] else self._control.brake #0.0
+        self._control.hand_brake = True if keys[K_SPACE] else self._control.hand_brake #bool(keys[K_SPACES])
 
     @staticmethod
     def _is_quit_shortcut(key):
@@ -615,7 +672,7 @@ def main(args=None):
     roscomp.init("manual_control", args=args)
 
     # resolution should be similar to spawned camera with role-name 'view'
-    resolution = {"width": 800, "height": 600}
+    resolution = {"width": 1920, "height": 1080}
 
     pygame.init()
     pygame.font.init()
